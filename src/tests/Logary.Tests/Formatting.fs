@@ -10,6 +10,16 @@ open Logary.Formatting
 
 open Logary.Tests.TestDSL
 
+type SampleDuOverridingToString =
+  | SampleCase1 of sc1Int : int
+  | SampleCase2
+  | SampleCase3 of sc3String : string * sc3Int : int
+  override x.ToString() = sprintf "%A" x
+
+type SampleRecord =
+  { Field1 : string
+    Field2 : int option }
+
 let private sampleMessage : Message =
   { name      = PointName.ofList ["a"; "b"; "c"; "d"]
     value     = Event "this is bad"
@@ -179,6 +189,62 @@ let tests =
       |> should equal ("This {gramaticalStructure} contains {wordCount} words.",
                        Set [ "gramaticalStructure", Field (String "sentence", None)
                              "wordCount", Field (Int64 4L, None) ])
+      |> thatsIt
+      
+
+    testCase "Message.Capture can stringify objects (ignoring format) by prepending '$' to the property name" <| fun _ ->
+      let format = "This {$stringifiedTimeSpanProperty:ignored} and {$stringifiedCustomObj:ignored} works."
+      (because "message templates" <| fun () ->
+        Message.Capture (format, TimeSpan.FromDays 1.0, SampleCase3("t", 9))
+        |> Set.ofList)
+      |> should equal (Set [ "stringifiedTimeSpanProperty", Field (String "1.00:00:00", None)
+                             "stringifiedCustomObj",        Field (String "SampleCase3 (\"t\",9)", None) ])
+      |> thatsIt
+
+
+    testCase "Message.Capture can handle a Generic.Dictionary<Tkey,TValue>, which becomes an Object (map) in logary" <| fun _ ->
+      let properDict list = System.Collections.Generic.Dictionary<'TKey, 'TValue>(dict list)
+      let a99 = { Field1="A"; Field2=Some 99 }
+      let format = "This {dictIntString} and {dictStringInt} and {dictGuidGuid} and {dictStringObj} works."
+      (because "message templates" <| fun () ->
+        Message.Capture (format,  properDict [1, "1"],
+                                  properDict ["1", 1],
+                                  properDict [Guid.Empty, Guid.Empty],
+                                  properDict [ "o1", box (SampleCase1 1)
+                                               "o2", box a99 ] // <-- Calls ToString() by default, without '@'
+        )
+        |> Set.ofList)
+      |> should equal (Set [ "dictIntString", Field (Object (Map ["1",  String "1"]), None)
+                             "dictStringInt", Field (Object (Map ["1",  Int64   1L]), None)
+                             "dictGuidGuid",  Field (Object (Map ["00000000-0000-0000-0000-000000000000", String "00000000-0000-0000-0000-000000000000"]), None)
+                             "dictStringObj", Field (Object (Map ["o1", String "SampleCase1 1"
+                                                                  "o2", String "Logary.Tests.Formatting+SampleRecord" ]), None) ])
+      |> thatsIt
+
+    testCase "Message.Capture can extract the structure of objects by prepending '@' to the property name" <| fun _ ->
+      let format = "This {@theVersion:#ignored} and {@theDuCase:#ignored} and {$theDuCaseStringified} works too."
+      let expectedVersionProperties = Map [ "Build", Int64 0L
+                                            "Major", Int64 1L
+                                            "MajorRevision", Int64 0L
+                                            "Minor", Int64 0L
+                                            "MinorRevision", Int64 0L
+                                            "Revision", Int64 0L
+                                            "_typeTag", String "Version" ]
+
+      let expectedDuSampleCase3Properties = Map [ "IsSampleCase1", Bool false
+                                                  "IsSampleCase2", Bool false
+                                                  "IsSampleCase3", Bool true
+                                                  "sc3String", String "A"
+                                                  "sc3Int", Int64 1L
+                                                  "Tag", Int64 2L
+                                                  "_typeTag", String "SampleCase3" ]
+
+      (because "message templates" <| fun () ->
+        Message.Capture (format, Version.Parse "1.0.0.0", SampleCase3("A", 1), SampleCase2)
+        |> Set.ofList)
+      |> should equal (Set [ "theVersion",            Field (Object expectedVersionProperties, None)
+                             "theDuCase",             Field (Object expectedDuSampleCase3Properties, None)
+                             "theDuCaseStringified",  Field (String "SampleCase2", None) ])
       |> thatsIt
 
     testCase "Formatting.templateFormat, named fields, missing last" <| fun _ ->

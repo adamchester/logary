@@ -1498,3 +1498,52 @@ module Message =
         setFieldValue ErrorsFieldName (Field (Array [], None)) msg
 
     Lens.setPartial Lenses.errors_ exnsNext msg
+
+module internal LogaryCapturing =
+  open Logary.Utils.FsMessageTemplates
+
+  let rec convertTemplatePropertyToField (provider : IFormatProvider) (tpv : TemplatePropertyValue) : Value =
+    match tpv with
+    | ScalarValue v ->
+      // TODO: consider types like Guid, DateTime, DateTimeOffset. Are they prematurely stringified in Value.ofObject?
+      // Does that prevent us from using the message template format string later in the pipeline?
+      Value.ofObject v
+
+    | DictionaryValue kvpList ->
+      let stringObjMap =
+        kvpList
+        |> List.map (fun (k, v) ->
+          let keyValue = match k with | ScalarValue v -> v.ToString() | _ -> failwith "only scalar value keys are supported"
+          keyValue, (convertTemplatePropertyToField provider v))
+        |> Map.ofList
+      Value.Object stringObjMap
+
+    | SequenceValue tpvList ->
+      Value.Array (tpvList |> List.map (convertTemplatePropertyToField provider))
+
+    | StructureValue (typeTag, pnvList) ->
+      Value.Object (
+        pnvList
+        |> List.map (fun pnv -> pnv.Name, convertTemplatePropertyToField provider pnv.Value)
+        |> List.append [ "_typeTag", Value.String typeTag ]
+        |> Map.ofList)
+
+  let rec convertToNameAndField (provider : IFormatProvider) (pnv : PropertyNameAndValue) : string * Field =
+    pnv.Name, Field ((convertTemplatePropertyToField provider pnv.Value), None)
+
+  let capture (template : Utils.FsMessageTemplates.Template) ([<ParamArray>] args : obj[]) =
+    Capturing.captureProperties template args
+    |> Seq.map (convertToNameAndField (Globalization.CultureInfo.InvariantCulture))
+    |> List.ofSeq
+
+open Logary.Utils.FsMessageTemplates
+
+// TODO: come up with a better name and place for this.
+// the important thing is that it's a static class member, allowing [<ParamArray>] to work
+type Message with
+  /// Converts a String.Format-style format string and an array of arguments into
+  /// a message template and a set of fields.
+  static member Capture (template : string, [<ParamArray>] args : obj[]) =
+    LogaryCapturing.capture (Parser.parse template) args
+
+    
