@@ -852,3 +852,65 @@ module Message =
         x.fields |> Map.add FieldErrorsKey (box (box ex :: arr))
 
     { x with fields = fields' }
+
+
+[<AutoOpen>]
+module TemplateEvent =
+
+  [<AutoOpen>]
+  module internal Capturing =
+
+    let parseRequiredNumProps format numRequiredProps =
+      let props = ResizeArray<FsMtParser.Property>()
+      FsMtParser.parseParts format ignore props.Add
+      let propList = props :> System.Collections.Generic.IReadOnlyList<_>
+      if propList.Count <> numRequiredProps then
+        failwithf "template '%s' must have exactly %i named property" format numRequiredProps
+      propList
+  
+    let captureField property value =
+      () // todo
+
+  type Message with
+    // We use extension methods so that overloading works
+
+    static member templateEvent<'T> (level : LogLevel, format : string) : ('T -> LogLevel -> Message) =
+      let props = parseRequiredNumProps format 1
+      let field = props.[0]
+      fun (v : 'T) _ ->
+        Message.event level format
+        |> Message.setFieldValue field.name (captureField field v)
+
+    static member templateEvent<'T1, 'T2> (level : LogLevel, format : string) : ('T1 -> 'T2 -> LogLevel -> Message) =
+      let props = parseRequiredNumProps format 2
+      let field1 = props.[0]
+      let field2 = props.[1]
+      fun (v1 : 'T1) (v2 : 'T2) _ ->
+        Message.event level format
+        |> Message.setFieldValue field1.name (Capturing.captureField field1 v1)
+        |> Message.setFieldValue field2.name (Capturing.captureField field2 v2)
+
+    static member templateEvent<'T1, 'T2, 'T3> (level : LogLevel, format : string) : ('T1 -> 'T2 -> 'T3 -> LogLevel -> Message) =
+      let props = parseRequiredNumProps format 3
+      let field1 = props.[0]
+      let field2 = props.[1]
+      let field3 = props.[2]
+      fun (v1 : 'T1) (v2 : 'T2) (v3 : 'T3) _ ->
+        Message.event level format
+        |> Message.setFieldValue field1.name (Capturing.captureField field1 v1)
+        |> Message.setFieldValue field2.name (Capturing.captureField field2 v2)
+        |> Message.setFieldValue field3.name (Capturing.captureField field3 v3)
+
+    static member templateEvent<'T1, 'T2, 'T3, 'T4> (level : LogLevel, format : string) : ('T1 -> 'T2 -> 'T3 -> 'T4 -> LogLevel -> Message) =
+      let props = parseRequiredNumProps format 4
+      let field1 = props.[0]
+      let field2 = props.[1]
+      let field3 = props.[2]
+      let field4 = props.[3]
+      fun (v1 : 'T1) (v2 : 'T2) (v3 : 'T3) (v4 : 'T4) _ ->
+        Message.event level format
+        |> Message.setFieldValue field1.name (Capturing.captureField field1 v1)
+        |> Message.setFieldValue field2.name (Capturing.captureField field2 v2)
+        |> Message.setFieldValue field3.name (Capturing.captureField field3 v3)
+        |> Message.setFieldValue field4.name (Capturing.captureField field4 v4)
+
