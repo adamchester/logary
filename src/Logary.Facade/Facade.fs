@@ -2,7 +2,7 @@
 /// library. See https://github.com/logary/logary for details. This module is
 /// completely stand-alone in that it has no external references and its adapter
 /// in Logary has been well tested.
-namespace Libryy.Logging
+namespace Logary.Facade
 
 open System
 open System.Runtime.CompilerServices
@@ -322,14 +322,24 @@ module internal FsMtParser =
     member x.captureHint = captureHint
     member x.align = align
     /// Appends this property the string builder.
-    member internal x.AppendPropertyString(sb : StringBuilder, ?replacementName) =
-      sb.Append("{")
-        .Append(match x.captureHint with CaptureHint.Structure -> "@" | CaptureHint.Stringify -> "$" | _ -> "")
-        .Append(defaultArg replacementName name)
+    member internal x.AppendPropertyString(sb : StringBuilder, ?replacementName, ?appendCaptureHint) =
+      let appendCaptureHint = defaultArg appendCaptureHint true
+      sb.Append("{") |> ignore
+
+      if appendCaptureHint then
+        match x.captureHint with
+        | CaptureHint.Structure -> sb.Append "@" |> ignore
+        | CaptureHint.Stringify -> sb.Append "$" |> ignore
+        | _ -> ()
+
+      sb.Append(defaultArg replacementName name)
         .Append(match x.format with null | "" -> "" | _ -> ":" + x.format) |> ignore
+
       if not (x.align.isEmpty) then
         sb.Append(if x.align.direction = AlignDirection.Right then ",-" else ",")
-          .Append(string x.align.width) |> ignore
+          .Append(string x.align.width)
+          |> ignore
+
       sb.Append("}")
     override x.ToString() = x.AppendPropertyString(StringBuilder()).ToString()
 
@@ -450,11 +460,10 @@ module internal FsMtParser =
       if nameRange.isEmpty then
         Property.empty // property name is empty
       else
-        let maybeCaptureHintChar = template.[nameRange.start]
         let propertyNameStartIndex, captureHint =
-          match maybeCaptureHintChar with
-          | '@' -> nameRange.start+1, CaptureHint.Structure
-          | '$' -> nameRange.start+1, CaptureHint.Stringify
+          match template.[nameRange.start] with
+          | '@' -> nameRange.start + 1, CaptureHint.Structure
+          | '$' -> nameRange.start + 1, CaptureHint.Stringify
           | _ -> nameRange.start, CaptureHint.Default
 
         let propertyName = Range.substring (template, propertyNameStartIndex, nameRange.``end``)
@@ -560,10 +569,18 @@ module internal Formatting =
   open Literals
   open Literate
 
-  let rec appendTokenParts options (prop: FsMtParser.Property) propValue (tokenParts : ResizeArray<string * LiterateToken>) =
+  let rec appendTokenParts options
+                           (prop: FsMtParser.Property)
+                           propValue
+                           (tokenParts : ResizeArray<string * LiterateToken>) =
+
     let propValueToFormattedString () =
       // render using string.Format, so the formatting is applied
-      let stringFormatTemplate = prop.AppendPropertyString(StringBuilder(), "0").ToString()
+      let stringFormatTemplate =
+        prop.AppendPropertyString(StringBuilder(),
+                                  replacementName="0",
+                                  appendCaptureHint=false).ToString()
+
       String.Format (options.formatProvider, stringFormatTemplate, [| propValue |])
 
     match propValue with
@@ -982,61 +999,97 @@ module Message =
 
 [<AutoOpen>]
 module TemplateEvent =
+  open FsMtParser
 
   [<AutoOpen>]
   module internal Capturing =
+    open System.Text
 
-    let parseRequiredNumProps format numRequiredProps =
-      let props = ResizeArray<FsMtParser.Property>()
-      FsMtParser.parseParts format ignore props.Add
-      let propList = props :> System.Collections.Generic.IReadOnlyList<_>
+    type Capturer = obj -> obj
+
+    let stringifyValue (property : Property) (value : obj) = 
+      match value with
+      | null -> box "null"
+      | _ -> 
+        // Use String.Format to apply the formatting rules
+        let formatString = property.AppendPropertyString(StringBuilder(), replacementName="0", appendCaptureHint=false)
+        box (String.Format(formatString.ToString(), value))
+
+    let captureField (property : Property) (value : obj) =
+      match property.captureHint with
+      | CaptureHint.Stringify -> stringifyValue property value
+      | CaptureHint.Structure ->
+        value.GetType().GetProperties()
+        |> Array.map (fun p -> p.Name, p.GetValue(value))
+        |> Map.ofArray
+        |> box
+      | _ ->
+        value
+
+    let propertiesOrThrow format numRequiredProps =
+      let propsAndCapturers = ResizeArray<Property * Capturer>()
+      let foundProp (prop : Property) =
+        propsAndCapturers.Add (prop, (captureField prop))
+      parseParts format ignore foundProp
+      let propList = propsAndCapturers :> System.Collections.Generic.IReadOnlyList<_>
       if propList.Count <> numRequiredProps then
-        failwithf "template '%s' must have exactly %i named property" format numRequiredProps
+        failwithf "template format must have exactly %i named properties: '%s'" numRequiredProps format
       propList
-  
-    let captureField property value = ()
-
 
   type Message with
-    // We use extension methods so that overloading works
-
-    static member templateEvent<'T> (level : LogLevel, format : string) : ('T -> LogLevel -> Message) =
-      let props = parseRequiredNumProps format 1
-      let field = props.[0]
-      fun (v : 'T) _ ->
+    /// Allows creating a predefined event using a format with 1 named
+    /// property (e.g. "Hello {name1}"). The returned function accepts
+    /// the the property value (typed 'T), followed by a log level, and
+    /// finally returns the generated Message with the structured values
+    /// attached as fields.
+    /// Usage:
+    /// let myEvent = Message.TemplateEvent<string> "Hello {name}";
+    /// logger.verbose (myEvent "Adam")
+    static member templateEvent<'T> (format : string) : ('T -> LogLevel -> Message) =
+      let props = propertiesOrThrow format 1
+      let field, capturer = props.[0]
+      fun (v : 'T) level ->
         Message.event level format
-        |> Message.setFieldValue field.name (captureField field v)
+        |> Message.setFieldValue field.name (capturer v)
 
-    static member templateEvent<'T1, 'T2> (level : LogLevel, format : string) : ('T1 -> 'T2 -> LogLevel -> Message) =
-      let props = parseRequiredNumProps format 2
-      let field1 = props.[0]
-      let field2 = props.[1]
-      fun (v1 : 'T1) (v2 : 'T2) _ ->
+    /// Allows creating a predefined event using a format with 1 named
+    /// properties (e.g. "Hello {name1} and {name2}"). The returned function
+    /// accepts the the property values, followed by a log level, and
+    /// finally returns the generated Message with the structured values attached
+    /// as fields.
+    /// Usage:
+    /// let myEvent = Message.TemplateEvent<string, string> "Hello {name1} and {name2}";
+    /// logger.verbose (myEvent "Adam" "Haf")
+    static member templateEvent<'T1, 'T2> (format : string) : ('T1 -> 'T2 -> LogLevel -> Message) =
+      let props = propertiesOrThrow format 2
+      let field1, capturer1 = props.[0]
+      let field2, capturer2 = props.[1]
+      fun (v1 : 'T1) (v2 : 'T2) level ->
         Message.event level format
-        |> Message.setFieldValue field1.name (Capturing.captureField field1 v1)
-        |> Message.setFieldValue field2.name (Capturing.captureField field2 v2)
+        |> Message.setFieldValue field1.name (capturer1 v1)
+        |> Message.setFieldValue field2.name (capturer2 v2)
 
-    static member templateEvent<'T1, 'T2, 'T3> (level : LogLevel, format : string) : ('T1 -> 'T2 -> 'T3 -> LogLevel -> Message) =
-      let props = parseRequiredNumProps format 3
-      let field1 = props.[0]
-      let field2 = props.[1]
-      let field3 = props.[2]
-      fun (v1 : 'T1) (v2 : 'T2) (v3 : 'T3) _ ->
+    static member templateEvent<'T1, 'T2, 'T3> (format : string) : ('T1 -> 'T2 -> 'T3 -> LogLevel -> Message) =
+      let props = propertiesOrThrow format 3
+      let field1, capturer1 = props.[0]
+      let field2, capturer2 = props.[1]
+      let field3, capturer3 = props.[2]
+      fun (v1 : 'T1) (v2 : 'T2) (v3 : 'T3) level ->
         Message.event level format
-        |> Message.setFieldValue field1.name (Capturing.captureField field1 v1)
-        |> Message.setFieldValue field2.name (Capturing.captureField field2 v2)
-        |> Message.setFieldValue field3.name (Capturing.captureField field3 v3)
+        |> Message.setFieldValue field1.name (capturer1 v1)
+        |> Message.setFieldValue field2.name (capturer2 v2)
+        |> Message.setFieldValue field3.name (capturer3 v3)
 
-    static member templateEvent<'T1, 'T2, 'T3, 'T4> (level : LogLevel, format : string) : ('T1 -> 'T2 -> 'T3 -> 'T4 -> LogLevel -> Message) =
-      let props = parseRequiredNumProps format 4
-      let field1 = props.[0]
-      let field2 = props.[1]
-      let field3 = props.[2]
-      let field4 = props.[3]
-      fun (v1 : 'T1) (v2 : 'T2) (v3 : 'T3) (v4 : 'T4) _ ->
+    static member templateEvent<'T1, 'T2, 'T3, 'T4> (format : string) : ('T1 -> 'T2 -> 'T3 -> 'T4 -> LogLevel -> Message) =
+      let props = propertiesOrThrow format 4
+      let field1, capturer1 = props.[0]
+      let field2, capturer2 = props.[1]
+      let field3, capturer3 = props.[2]
+      let field4, capturer4 = props.[3]
+      fun (v1 : 'T1) (v2 : 'T2) (v3 : 'T3) (v4 : 'T4) level ->
         Message.event level format
-        |> Message.setFieldValue field1.name (Capturing.captureField field1 v1)
-        |> Message.setFieldValue field2.name (Capturing.captureField field2 v2)
-        |> Message.setFieldValue field3.name (Capturing.captureField field3 v3)
-        |> Message.setFieldValue field4.name (Capturing.captureField field4 v4)
+        |> Message.setFieldValue field1.name (capturer1 v1)
+        |> Message.setFieldValue field2.name (capturer2 v2)
+        |> Message.setFieldValue field3.name (capturer3 v3)
+        |> Message.setFieldValue field4.name (capturer4 v4)
 

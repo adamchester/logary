@@ -3,12 +3,36 @@ open System
 open Libryy.Logging
 open Libryy.Logging.Message
 
-let logger = Targets.create Info
+let logger = Targets.create Verbose
+
+type MyRecord = { id: string; text: string }
+  with override x.ToString() = sprintf "(ID=%s) \"%s\"" x.id x.text
+
+type MyDu =
+  | Case1 of int * decimal
+  | Case2 of string * DateTime
 
 [<EntryPoint>]
 let main argv = 
-  let myEvent = Message.templateEvent<string> (Debug, "Hello {name}")
-  let logArgs = Message.templateEvent<string[]> (Debug, "Recieved {args}")
-  logger.info (logArgs argv)
+
+  let myString = Message.templateEvent<string> "My string is {string}"
+  let receivedMyDuDefault = Message.templateEvent<MyDu> "Received MyDu itself as {duDefaultCapture}"
+  let receivedMyDuStringified = Message.templateEvent<MyDu> "Received MyDu stringified as {$duStringified}"
+  let receivedMyDuStructured = Message.templateEvent<MyDu> "Received MyDu structured as {@duStructured}"
+
+  let receivedMyRecordDefault = Message.templateEvent<MyRecord> "Received MyRecord itself as {record}"
+  let receivedMyRecordStringified = Message.templateEvent<MyRecord> "Received MyRecord stringified as {$recordStringified}"
+  let receivedMyRecordStructured = Message.templateEvent<MyRecord> "Received MyRecord structured as {@recordStructured}"
+
+  logger.verbose (myString "test")
+  let myDuCase1_99 = Case1 (99, 99M)
+  logger.debug (receivedMyDuDefault myDuCase1_99)
+  logger.debug (receivedMyDuStringified myDuCase1_99)
+  logger.debug (receivedMyDuStructured myDuCase1_99)
+
+  let myRecordValue9 = {id="9"; text="nine"}
+  logger.info (receivedMyRecordDefault myRecordValue9)
+  logger.info (receivedMyRecordStructured myRecordValue9)
+  logger.info (receivedMyRecordStringified myRecordValue9)
   
   0 // return an integer exit code
