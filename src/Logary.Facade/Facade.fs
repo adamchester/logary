@@ -2,7 +2,7 @@
 /// library. See https://github.com/logary/logary for details. This module is
 /// completely stand-alone in that it has no external references and its adapter
 /// in Logary has been well tested.
-namespace Logary.Facade
+namespace Libryy.Logging
 
 open System
 open System.Runtime.CompilerServices
@@ -292,29 +292,55 @@ module Literals =
 module internal FsMtParser =
   open System.Text
 
-  type Property(name : string, format : string) =
-    static let emptyInstance = Property("", null)
+  type CaptureHint =
+    | Default = 0
+    | Structure = 1
+    | Stringify = 2
+
+  type AlignDirection = Right = 0 | Left = 1
+
+  [<Struct>]
+  type AlignInfo =
+      new (direction : AlignDirection, width : int) = { _direction=direction; _width=width; }
+      new (isValid : bool) = { _direction = AlignDirection.Right; _width = (if isValid then -1 else -2) }
+      val private _direction : AlignDirection
+      val private _width : int
+      member this.direction with get() = this._direction
+      member this.width with get() = this._width
+      member this.isEmpty = this.width = -1
+      member internal this.isValid = this.width <> -2
+      static member empty = AlignInfo(isValid=true)
+      static member invalid = AlignInfo(isValid=false)
+
+  /// Represents a property; a placeholder in a message template which can be parsed
+  /// and later replaced 
+  type Property(name : string, format : string, captureHint : CaptureHint, align : AlignInfo) =
+    static let emptyInstance = Property("", null, CaptureHint.Default, AlignInfo.empty)
     static member empty = emptyInstance
     member x.name = name
     member x.format = format
+    member x.captureHint = captureHint
+    member x.align = align
+    /// Appends this property the string builder.
     member internal x.AppendPropertyString(sb : StringBuilder, ?replacementName) =
       sb.Append("{")
+        .Append(match x.captureHint with CaptureHint.Structure -> "@" | CaptureHint.Stringify -> "$" | _ -> "")
         .Append(defaultArg replacementName name)
-        .Append(match x.format with null | "" -> "" | _ -> ":" + x.format)
-        .Append("}")
+        .Append(match x.format with null | "" -> "" | _ -> ":" + x.format) |> ignore
+      if not (x.align.isEmpty) then
+        sb.Append(if x.align.direction = AlignDirection.Right then ",-" else ",")
+          .Append(string x.align.width) |> ignore
+      sb.Append("}")
     override x.ToString() = x.AppendPropertyString(StringBuilder()).ToString()
 
   module internal ParserBits =
 
-    let inline isNull o =
-      match o with
-      | null -> true
-      | _ -> false
-
     let inline isLetterOrDigit c = System.Char.IsLetterOrDigit c
     let inline isValidInPropName c = c = '_' || System.Char.IsLetterOrDigit c
+    let inline isValidInAlignment c = c = '-' || System.Char.IsDigit c
+    let inline isValidInCaptureHint c = c = '@' || c = '$'
     let inline isValidInFormat c = c <> '}' && (c = ' ' || isLetterOrDigit c || System.Char.IsPunctuation c)
-    let inline isValidCharInPropTag c = c = ':' || isValidInPropName c || isValidInFormat c
+    let inline isValidCharInPropTag c = c = ':' || isValidInPropName c || isValidInFormat c || isValidInCaptureHint c
 
     [<Struct>]
     type Range(startIndex : int, endIndex : int) =
@@ -323,6 +349,7 @@ module internal FsMtParser =
       member inline x.length = (endIndex - startIndex) + 1
       member inline x.getSubstring (s : string) = s.Substring(startIndex, x.length)
       member inline x.isEmpty = startIndex = -1 && endIndex = -1
+      override x.ToString() = sprintf "(start=%i, end=%i)" x.start x.``end``
       static member inline substring (s : string, startIndex, endIndex) = s.Substring(startIndex, (endIndex - startIndex) + 1)
       static member inline empty = Range(-1, -1)
 
@@ -344,27 +371,110 @@ module internal FsMtParser =
 
     let inline hasAny predicate (s : string) = hasAnyInRange predicate s (Range(0, s.Length - 1))
     let inline indexOfInRange s range c = tryGetFirstCharInRange ((=) c) s range
-
-    let inline tryGetPropInRange (template : string) (within : Range) : Property =
-      // Attempts to validate and parse a property token within the specified range inside
-      // the template string. If the property insides contains any invalid characters,
-      // then the `Property.Empty' instance is returned (hence the name 'try')
-      let nameRange, formatRange =
-        match indexOfInRange template within ':' with
-        | -1 ->
-          within, Range.empty // no format
-        | formatIndex ->
-          Range(within.start, formatIndex-1), Range(formatIndex+1, within.``end``) // has format part
-      let propertyName = nameRange.getSubstring template
-      if propertyName = "" || (hasAny (not<<isValidInPropName) propertyName) then
-        Property.empty
-      elif (not formatRange.isEmpty) && (hasAnyInRange (not<<isValidInFormat) template formatRange) then
-        Property.empty
+  
+    /// Attemps to parse an integer from the range within a string. Returns invalidValue if the
+    /// string does not contain an integer. The '-' is allowed only as the first character.
+    let inline tryParseIntFromRng (invalidValue : int) (s : string) (range : Range) =
+      if range.length = 1 && '0' <= s.[0] && s.[0] <= '9' then
+        int (s.[range.start]) - 48
       else
-        let format = if formatRange.isEmpty then null else formatRange.getSubstring template
-        Property(propertyName, format)
+        let indexOfLastCharPlus1 = range.``end``+1
+        let rec inside isNeg numSoFar i =
+          if i = indexOfLastCharPlus1 then
+            if isNeg then -numSoFar else numSoFar
+          else
+            let c = s.[i]
+            if c = '-' then
+              if i = range.start then inside true (numSoFar) (i+1)
+              else invalidValue // no '-' character allowed other than first char
+            elif '0' <= c && c <= '9' then
+              inside isNeg (10*numSoFar + int c - 48) (i+1)
+            else invalidValue
 
-    let findNextNonPropText (startAt : int) (template : string) (foundText : string->unit) : int =
+        inside false 0 range.start
+
+    /// Will parse ",-10"   as AlignInfo(direction=Left, width=10).
+    /// Will parse ",5"     as AlignInfo(direction=Right, width=5).
+    /// Will parse ",0"     as AlignInfo(isValid=false) because 0 is not a valid alignment.
+    /// Will parse ",-0"    as AlignInfo(isValid=false) because 0 is not a valid alignment.
+    /// Will parse ",,5"    as AlignInfo(isValid=false) because ',5' is not an int.
+    /// Will parse ",5-"    as AlignInfo(isValid=false) because '-' is in the wrong place.
+    /// Will parse ",asdf"  as AlignInfo(isValid=false) because 'asdf' is not an int.
+    let inline tryParseAlignInfoRng (s:string) (rng:Range) =
+      match s, rng with
+      | s, rng when (rng.start > rng.``end``) || (hasAnyInRange (not << isValidInAlignment) s rng) ->
+        AlignInfo.invalid
+
+      | s, rng ->
+        let width =
+          match tryParseIntFromRng (System.Int32.MinValue) s rng with
+          | System.Int32.MinValue -> 0 // not a valid align number (e.g. dash in wrong spot)
+          | n -> n
+
+        if width = 0 then AlignInfo.invalid
+        else
+          let isNegativeAlignWidth = width < 0
+          let direction = if isNegativeAlignWidth then AlignDirection.Left else AlignDirection.Right
+          AlignInfo(direction, abs(width))
+
+    /// Attempts to validate and parse a property token within the specified range. If the property
+    /// insides contains any invalid characters, then the `Property.empty' instance is returned.
+    let inline tryGetPropInRange (template : string) (within : Range) : Property =
+      let nameRange, alignRange, formatRange =
+        match indexOfInRange template within ',', indexOfInRange template within ':' with
+        | -1, -1 ->
+          // neither align nor format
+          within, Range.empty, Range.empty
+
+        | -1, fmtIdx ->
+          // has format part, but does not have align part
+          Range(within.start, fmtIdx-1), Range.empty, Range(fmtIdx+1, within.``end``)
+
+        | alIdx, -1 ->
+          // has align part, but does not have format part
+          Range(within.start, alIdx-1), Range(alIdx+1, within.``end``), Range.empty
+
+        | alIdx, fmtIdx when alIdx < fmtIdx && alIdx <> (fmtIdx-1) ->
+          // has both align and format parts, in the correct order
+          let align = Range(alIdx+1, fmtIdx-1)
+          let fmt = Range(fmtIdx+1, within.``end``)
+          Range(within.start, alIdx-1), align, fmt
+
+        | alIdx, fmtIdx when alIdx > fmtIdx ->
+          // has format part, no align (but one or more commas *inside* the format string)
+          Range(within.start, fmtIdx-1), Range.empty, Range(fmtIdx+1, within.``end``)
+
+        | _, _ ->
+          Range.empty, Range.empty, Range.empty
+
+      if nameRange.isEmpty then
+        Property.empty // property name is empty
+      else
+        let maybeCaptureHintChar = template.[nameRange.start]
+        let propertyNameStartIndex, captureHint =
+          match maybeCaptureHintChar with
+          | '@' -> nameRange.start+1, CaptureHint.Structure
+          | '$' -> nameRange.start+1, CaptureHint.Stringify
+          | _ -> nameRange.start, CaptureHint.Default
+
+        let propertyName = Range.substring (template, propertyNameStartIndex, nameRange.``end``)
+        if propertyName = "" || (hasAny (not<<isValidInPropName) propertyName) then
+          // property name has invalid characters
+          Property.empty
+        else
+          if (not formatRange.isEmpty) && (hasAnyInRange (not<<isValidInFormat) template formatRange) then
+            Property.empty // format range has invalid characters
+          else
+            match alignRange.isEmpty, formatRange.isEmpty with
+            | true, true -> Property(propertyName, null, captureHint, AlignInfo.empty)
+            | true, false -> Property(propertyName, formatRange.getSubstring template, captureHint, AlignInfo.empty)
+            | false, _ ->
+              let formatString = if formatRange.isEmpty then null else formatRange.getSubstring template
+              match tryParseAlignInfoRng template alignRange with
+              | ai when ai.isValid -> Property(propertyName, formatString, captureHint, ai)
+              | _ -> Property.empty // align has invalid characters
+
+    let inline findNextNonPropText (startAt : int) (template : string) (foundText : string->unit) : int =
       // Finds the next text token (starting from the 'startAt' index) and returns the next character
       // index within the template string. If the end of the template string is reached, or the start
       // of a property token is found (i.e. a single { character), then the 'consumed' text is passed
@@ -383,10 +493,12 @@ module internal FsMtParser =
           match ch with
           | '{' ->
             if (i+1) < template.Length && template.[i+1] = '{' then
-              createStringBuilderAndPopulate i; append ch; go (i+2)
+              createStringBuilderAndPopulate i
+              append ch; go (i+2)
             else i // found an open brace (potentially a property), so bail out
           | '}' when (i+1) < template.Length && template.[i+1] = '}' ->
-            createStringBuilderAndPopulate i; append ch; go (i+2)
+            createStringBuilderAndPopulate i
+            append ch; go (i+2)
           | _ ->
             append ch; go (i+1)
 
@@ -399,8 +511,8 @@ module internal FsMtParser =
       nextIndex
 
     let findPropOrText (start : int) (template : string)
-                       (foundText : string -> unit)
-                       (foundProp : Property -> unit) : int =
+                        (foundText : string -> unit)
+                        (foundProp : Property -> unit) : int =
       // Attempts to find the indices of the next property in the template
       // string (starting from the 'start' index). Once the start and end of
       // the property token is known, it will be further validated (by the
@@ -428,18 +540,18 @@ module internal FsMtParser =
           foundText (Range.substring(template, start, (nextIndex - 1)))
         nextIndex
 
-  /// Parses template strings such as "Hello, {PropertyWithFormat:##.##}"
+  /// Parses template strings such as "Hello, {@PropertyWithFormat:##.##}"
   /// and calls the 'foundTextF' or 'foundPropF' functions as the text or
   /// property tokens are encountered.
   let parseParts (template : string) foundTextF foundPropF =
     let tlen = template.Length
     let rec go start =
-      if start >= tlen then () else
-      match ParserBits.findNextNonPropText start template foundTextF with
-      | next when next <> start ->
-        go next
-      | _ ->
-        go (ParserBits.findPropOrText start template foundTextF foundPropF)
+      if start >= tlen then ()
+      else match ParserBits.findNextNonPropText start template foundTextF with
+            | next when next <> start ->
+              go next
+            | _ ->
+              go (ParserBits.findPropOrText start template foundTextF foundPropF)
     go 0
 
 /// Internal module for formatting text for printing to the console.
@@ -448,38 +560,45 @@ module internal Formatting =
   open Literals
   open Literate
 
+  let rec appendTokenParts options (prop: FsMtParser.Property) propValue (tokenParts : ResizeArray<string * LiterateToken>) =
+    let propValueToFormattedString () =
+      // render using string.Format, so the formatting is applied
+      let stringFormatTemplate = prop.AppendPropertyString(StringBuilder(), "0").ToString()
+      String.Format (options.formatProvider, stringFormatTemplate, [| propValue |])
+
+    match propValue with
+    | :? bool ->
+      tokenParts.Add (propValueToFormattedString(), KeywordSymbol)
+    | :? int16 | :? int32 | :? int64 | :? decimal | :? float | :? double ->
+      tokenParts.Add (propValueToFormattedString(), NumericSymbol)
+    | :? string | :? char ->
+      tokenParts.Add (propValueToFormattedString(), StringSymbol)
+    | :? System.Collections.Generic.IEnumerable<_> ->
+      tokenParts.Add ("[", Punctuation)
+      tokenParts.Add ("TODO", Text)
+      tokenParts.Add ("]", Punctuation)
+    | :? System.Collections.Generic.IDictionary<_, _> -> 
+      tokenParts.Add ("[", Punctuation)
+      tokenParts.Add ("TODO", Text)
+      tokenParts.Add ("]", Punctuation)
+    | _ ->
+      tokenParts.Add (propValueToFormattedString(), OtherSymbol)
+
   let literateFormatValue (options : LiterateOptions) (fields : Map<string, obj>) = function
     | Event template ->
-      let themedParts = ResizeArray<string * LiterateToken>()
+      let tokenParts = ResizeArray<string * LiterateToken>()
       let matchedFields = ResizeArray<string>()
-      let foundText (text: string) = themedParts.Add (text, Text)
+      let foundText (text: string) = tokenParts.Add (text, Text)
       let foundProp (prop: FsMtParser.Property) =
         match Map.tryFind prop.name fields with
         | Some propValue ->
-          // render using string.Format, so the formatting is applied
-          let stringFormatTemplate = prop.AppendPropertyString(StringBuilder(), "0").ToString()
-          let fieldAsText = String.Format (options.formatProvider, stringFormatTemplate, [| propValue |])
-          // find the right theme colour based on data type
-          let valueColour =
-            match propValue with
-            | :? bool ->
-              KeywordSymbol
-            | :? int16 | :? int32 | :? int64 | :? decimal | :? float | :? double ->
-              NumericSymbol
-            | :? string | :? char ->
-              StringSymbol
-            | _ ->
-              OtherSymbol
-          if options.printTemplateFieldNames then
-            themedParts.Add ("["+prop.name+"] ", Subtext)
+          appendTokenParts options prop propValue tokenParts
           matchedFields.Add prop.name
-          themedParts.Add (fieldAsText, valueColour)
-
         | None ->
-          themedParts.Add (prop.ToString(), MissingTemplateField)
+          tokenParts.Add (prop.ToString(), MissingTemplateField)
 
       FsMtParser.parseParts template foundText foundProp
-      Set.ofSeq matchedFields, List.ofSeq themedParts
+      Set.ofSeq matchedFields, List.ofSeq tokenParts
 
     | Gauge (value, units) ->
       Set.empty, [ sprintf "%i" value, NumericSymbol
@@ -501,10 +620,10 @@ module internal Formatting =
       | line ->
         if line.StartsWith(stackFrameLinePrefix) || line.StartsWith(monoStackFrameLinePrefix) then
           // subtext
-          go ((line, Subtext) :: (Environment.NewLine, Text) :: lines)
+          go ((Environment.NewLine, Text) :: ((line, Subtext) :: lines))
         else
           // regular text
-          go ((line, Text) :: (Environment.NewLine, Text) :: lines)
+          go ((Environment.NewLine, Text) :: ((line, Text) :: lines))
     go []
 
   let literateColouriseExceptions (context : LiterateOptions) message =
@@ -512,6 +631,7 @@ module internal Formatting =
       match message.fields.TryFind FieldExnKey with
       | Some (:? Exception as ex) ->
         literateExceptionColouriser context ex
+        @ [ Environment.NewLine, Text ]
       | _ ->
         [] // there is no spoon
     let errorsExceptionParts =
@@ -520,6 +640,7 @@ module internal Formatting =
         exnListAsObjList |> List.collect (function
           | :? exn as ex ->
             literateExceptionColouriser context ex
+            @ [ Environment.NewLine, Text ]
           | _ ->
             [])
       | _ ->
@@ -537,7 +658,13 @@ module internal Formatting =
     let themedMessageParts =
       message.value |> literateFormatValue options message.fields |> snd
 
-    let themedExceptionParts = literateColouriseExceptions options message
+    let themedExceptionParts =
+      let exnParts = literateColouriseExceptions options message
+      if not exnParts.IsEmpty then
+        [ Environment.NewLine, Text ]
+        @ exnParts
+        @ [ Environment.NewLine, Text ]
+      else []
 
     let getLogLevelToken = function
       | Verbose -> LevelVerbose
@@ -853,7 +980,6 @@ module Message =
 
     { x with fields = fields' }
 
-
 [<AutoOpen>]
 module TemplateEvent =
 
@@ -868,8 +994,8 @@ module TemplateEvent =
         failwithf "template '%s' must have exactly %i named property" format numRequiredProps
       propList
   
-    let captureField property value =
-      () // todo
+    let captureField property value = ()
+
 
   type Message with
     // We use extension methods so that overloading works
