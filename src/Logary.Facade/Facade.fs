@@ -344,7 +344,7 @@ module internal FsMtParser =
     override x.ToString() = x.AppendPropertyString(StringBuilder()).ToString()
 
   module internal ParserBits =
-
+    let inline isNull o = match o with | null -> true | _ -> false
     let inline isLetterOrDigit c = System.Char.IsLetterOrDigit c
     let inline isValidInPropName c = c = '_' || System.Char.IsLetterOrDigit c
     let inline isValidInAlignment c = c = '-' || System.Char.IsDigit c
@@ -1004,37 +1004,88 @@ module TemplateEvent =
   [<AutoOpen>]
   module internal Capturing =
     open System.Text
+    open System.Collections.Generic
 
     type Capturer = obj -> obj
 
     let stringifyValue (property : Property) (value : obj) = 
-      match value with
-      | null -> box "null"
-      | _ -> 
-        // Use String.Format to apply the formatting rules
-        let formatString = property.AppendPropertyString(StringBuilder(), replacementName="0", appendCaptureHint=false)
-        box (String.Format(formatString.ToString(), value))
+      // Use String.Format to apply the formatting rules
+      let formatString = property.AppendPropertyString(
+                                      sb = StringBuilder(),
+                                      replacementName = "0",
+                                      appendCaptureHint = false)
 
-    let captureField (property : Property) (value : obj) =
+      box (String.Format (formatString.ToString(), value))
+
+    let createPublicPropertyCapturer<'TSource> () =
+      let typ = typeof<'TSource>
+      let publicReadProps =
+        typ.GetProperties() |> Array.filter (fun p -> p.CanRead)
+
+      if publicReadProps.Length = 0 then
+        failwithf "Type %s has no public readable properties to capture" typ.FullName
+
+      fun (value : obj) ->
+        let nameValueDict = Dictionary<string, obj>()
+        for i = 0 to publicReadProps.Length - 1 do
+          let prop = publicReadProps.[i]
+          try
+            let propValue = prop.GetValue value
+            nameValueDict.Add (prop.Name, propValue)
+          with e ->
+            nameValueDict.Add (prop.Name, sprintf "Property accessor threw exception: %s" e.Message)
+
+        box nameValueDict
+
+    let createCapturer<'TSource> (property : Property) =
       match property.captureHint with
-      | CaptureHint.Stringify -> stringifyValue property value
-      | CaptureHint.Structure ->
-        value.GetType().GetProperties()
-        |> Array.map (fun p -> p.Name, p.GetValue(value))
-        |> Map.ofArray
-        |> box
-      | _ ->
-        value
+      | CaptureHint.Stringify -> stringifyValue property
+      | CaptureHint.Structure -> createPublicPropertyCapturer<'TSource>()
+      | _ -> fun (value : 'TSource) -> box value
 
-    let propertiesOrThrow format numRequiredProps =
-      let propsAndCapturers = ResizeArray<Property * Capturer>()
-      let foundProp (prop : Property) =
-        propsAndCapturers.Add (prop, (captureField prop))
+    let propsOrThrow1<'TValue1> format =
+      let mutable prop : Property option = None
+      let foundProp p = 
+        match prop with
+        | None -> prop <- Some p
+        | _ -> failwith "template format must have exactly 1 named property: '%s'" format
       parseParts format ignore foundProp
-      let propList = propsAndCapturers :> System.Collections.Generic.IReadOnlyList<_>
-      if propList.Count <> numRequiredProps then
-        failwithf "template format must have exactly %i named properties: '%s'" numRequiredProps format
-      propList
+      match prop with
+      | Some p -> p, createCapturer<'TValue1> p
+      | None -> failwith "template format must have exactly 1 named property: '%s'" format
+
+    let propsOrThrow2<'T1, 'T2> format =
+      let props = ResizeArray<Property>()
+      let foundProp p = props.Add p
+      parseParts format ignore foundProp
+      if props.Count <> 2 then
+        failwithf "template format must have exactly 2 named properties: '%s'" format
+      
+      (props.[0], createCapturer<'T1> props.[0])
+      , (props.[1], createCapturer<'T2> props.[1])
+
+    let propsOrThrow3<'T1, 'T2, 'T3> format =
+      let props = ResizeArray<Property>()
+      let foundProp p = props.Add p
+      parseParts format ignore foundProp
+      if props.Count <> 3 then
+        failwithf "template format must have exactly 3 named properties: '%s'" format
+      
+      (props.[0], createCapturer<'T1> props.[0])
+      , (props.[1], createCapturer<'T2> props.[1])
+      , (props.[2], createCapturer<'T3> props.[2])
+
+    let propsOrThrow4<'T1, 'T2, 'T3, 'T4> format =
+      let props = ResizeArray<Property>()
+      let foundProp p = props.Add p
+      parseParts format ignore foundProp
+      if props.Count <> 4 then
+        failwithf "template format must have exactly 4 named properties: '%s'" format
+      
+      (props.[0], createCapturer<'T1> props.[0])
+      , (props.[1], createCapturer<'T2> props.[1])
+      , (props.[2], createCapturer<'T3> props.[2])
+      , (props.[3], createCapturer<'T4> props.[3])
 
   type Message with
     /// Allows creating a predefined event using a format with 1 named
@@ -1046,8 +1097,7 @@ module TemplateEvent =
     /// let myEvent = Message.TemplateEvent<string> "Hello {name}";
     /// logger.verbose (myEvent "Adam")
     static member templateEvent<'T> (format : string) : ('T -> LogLevel -> Message) =
-      let props = propertiesOrThrow format 1
-      let field, capturer = props.[0]
+      let field, capturer = propsOrThrow1<'T> format
       fun (v : 'T) level ->
         Message.event level format
         |> Message.setFieldValue field.name (capturer v)
@@ -1061,19 +1111,17 @@ module TemplateEvent =
     /// let myEvent = Message.TemplateEvent<string, string> "Hello {name1} and {name2}";
     /// logger.verbose (myEvent "Adam" "Haf")
     static member templateEvent<'T1, 'T2> (format : string) : ('T1 -> 'T2 -> LogLevel -> Message) =
-      let props = propertiesOrThrow format 2
-      let field1, capturer1 = props.[0]
-      let field2, capturer2 = props.[1]
+      let (field1, capturer1), (field2, capturer2) = propsOrThrow2 format
       fun (v1 : 'T1) (v2 : 'T2) level ->
         Message.event level format
         |> Message.setFieldValue field1.name (capturer1 v1)
         |> Message.setFieldValue field2.name (capturer2 v2)
 
     static member templateEvent<'T1, 'T2, 'T3> (format : string) : ('T1 -> 'T2 -> 'T3 -> LogLevel -> Message) =
-      let props = propertiesOrThrow format 3
-      let field1, capturer1 = props.[0]
-      let field2, capturer2 = props.[1]
-      let field3, capturer3 = props.[2]
+      let pc1, pc2, pc3 = propsOrThrow3 format
+      let field1, capturer1 = pc1
+      let field2, capturer2 = pc2
+      let field3, capturer3 = pc3
       fun (v1 : 'T1) (v2 : 'T2) (v3 : 'T3) level ->
         Message.event level format
         |> Message.setFieldValue field1.name (capturer1 v1)
@@ -1081,11 +1129,11 @@ module TemplateEvent =
         |> Message.setFieldValue field3.name (capturer3 v3)
 
     static member templateEvent<'T1, 'T2, 'T3, 'T4> (format : string) : ('T1 -> 'T2 -> 'T3 -> 'T4 -> LogLevel -> Message) =
-      let props = propertiesOrThrow format 4
-      let field1, capturer1 = props.[0]
-      let field2, capturer2 = props.[1]
-      let field3, capturer3 = props.[2]
-      let field4, capturer4 = props.[3]
+      let pc1, pc2, pc3, pc4 = propsOrThrow4 format
+      let field1, capturer1 = pc1
+      let field2, capturer2 = pc2
+      let field3, capturer3 = pc3
+      let field4, capturer4 = pc4
       fun (v1 : 'T1) (v2 : 'T2) (v3 : 'T3) (v4 : 'T4) level ->
         Message.event level format
         |> Message.setFieldValue field1.name (capturer1 v1)

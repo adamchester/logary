@@ -11,6 +11,10 @@ type MyRecord = { id: string; text: string }
 type MyDu =
   | Case1 of int * decimal
   | Case2 of string * DateTime
+  override x.ToString() =
+    match x with
+    | Case1 (i, d) -> sprintf "Case1 (%i, %M) (via ToString())" i d
+    | Case2 (s, dt) -> sprintf "Case2 (%s, %A) (via ToString())" s dt
 
 [<EntryPoint>]
 let main argv = 
