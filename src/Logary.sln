@@ -134,6 +134,7 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Logary.ElmahIO.CSharpExample", "..\examples\Logary.ElmahIO.CSharpExample\Logary.ElmahIO.CSharpExample.csproj", "{72F93478-DE52-4E58-8F5A-90EF53016674}"
 EndProject
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Logary.Metrics.WinPerfCounters.Tests", "tests\Logary.Metrics.WinPerfCounters.Tests\Logary.Metrics.WinPerfCounters.Tests.fsproj", "{66F98172-3595-432D-925C-1DBEFD99A060}"
+EndProject
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Logary.FacadeConsoleApp", "..\examples\Logary.FacadeConsoleApp\Logary.FacadeConsoleApp.fsproj", "{F81FDE19-A6F9-483E-B8E8-9B258C454576}"
 EndProject
 Global

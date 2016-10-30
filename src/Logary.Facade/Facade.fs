@@ -916,13 +916,13 @@ module Log =
   /// Create a named logger. Full stop (.) acts as segment delimiter in the
   /// hierachy of namespaces and loggers.
   let create (name : string) =
-    if name = null then invalidArg "name" "name is null"
+    match name with null -> invalidArg "name" "name is null" | _ -> ()
     Global.getStaticLogger (name.Split([|'.'|], StringSplitOptions.RemoveEmptyEntries))
     :> Logger
 
   /// Create an hierarchically named logger
   let createHiera (name : string[]) =
-    if name = null then invalidArg "name" "name is null"
+    match name with null -> invalidArg "name" "name is null" | _ -> ()
     if name.Length = 0 then invalidArg "name" "must have >0 segments"
     Global.getStaticLogger name
     :> Logger
@@ -962,7 +962,7 @@ module Message =
   /// Sets the name as a single string; if this string contains dots, the string
   /// will be split on these dots.
   let setSingleName (name : string) (x : Message) =
-    if name = null then invalidArg "name" "may not be null"
+    match name with null -> invalidArg "name" "may not be null" | _ -> ()
 
     let name' =
       name.Split([|'.'|], StringSplitOptions.RemoveEmptyEntries)
@@ -1048,11 +1048,11 @@ module TemplateEvent =
       let foundProp p = 
         match prop with
         | None -> prop <- Some p
-        | _ -> failwith "template format must have exactly 1 named property: '%s'" format
+        | _ -> failwithf "template format must have exactly 1 named property: '%s'" format
       parseParts format ignore foundProp
       match prop with
       | Some p -> p, createCapturer<'TValue1> p
-      | None -> failwith "template format must have exactly 1 named property: '%s'" format
+      | None -> failwithf "template format must have exactly 1 named property: '%s'" format
 
     let propsOrThrow2<'T1, 'T2> format =
       let props = ResizeArray<Property>()
