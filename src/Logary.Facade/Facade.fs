@@ -520,8 +520,8 @@ module internal FsMtParser =
       nextIndex
 
     let findPropOrText (start : int) (template : string)
-                        (foundText : string -> unit)
-                        (foundProp : Property -> unit) : int =
+                       (foundText : string -> unit)
+                       (foundProp : Property -> unit) : int =
       // Attempts to find the indices of the next property in the template
       // string (starting from the 'start' index). Once the start and end of
       // the property token is known, it will be further validated (by the
@@ -555,12 +555,12 @@ module internal FsMtParser =
   let parseParts (template : string) foundTextF foundPropF =
     let tlen = template.Length
     let rec go start =
-      if start >= tlen then ()
-      else match ParserBits.findNextNonPropText start template foundTextF with
-            | next when next <> start ->
-              go next
-            | _ ->
-              go (ParserBits.findPropOrText start template foundTextF foundPropF)
+      if start >= tlen then () else
+      match ParserBits.findNextNonPropText start template foundTextF with
+      | next when next <> start ->
+        go next
+      | _ ->
+        go (ParserBits.findPropOrText start template foundTextF foundPropF)
     go 0
 
 /// Internal module for formatting text for printing to the console.
@@ -637,10 +637,10 @@ module internal Formatting =
       | line ->
         if line.StartsWith(stackFrameLinePrefix) || line.StartsWith(monoStackFrameLinePrefix) then
           // subtext
-          go ((Environment.NewLine, Text) :: ((line, Subtext) :: lines))
+          go ((line, Subtext) :: (Environment.NewLine, Subtext) :: lines)
         else
           // regular text
-          go ((Environment.NewLine, Text) :: ((line, Text) :: lines))
+          go ((line, Text) :: (Environment.NewLine, Text) :: lines)
     go []
 
   let literateColouriseExceptions (context : LiterateOptions) message =
@@ -648,7 +648,6 @@ module internal Formatting =
       match message.fields.TryFind FieldExnKey with
       | Some (:? Exception as ex) ->
         literateExceptionColouriser context ex
-        @ [ Environment.NewLine, Text ]
       | _ ->
         [] // there is no spoon
     let errorsExceptionParts =
@@ -657,7 +656,6 @@ module internal Formatting =
         exnListAsObjList |> List.collect (function
           | :? exn as ex ->
             literateExceptionColouriser context ex
-            @ [ Environment.NewLine, Text ]
           | _ ->
             [])
       | _ ->
@@ -675,13 +673,7 @@ module internal Formatting =
     let themedMessageParts =
       message.value |> literateFormatValue options message.fields |> snd
 
-    let themedExceptionParts =
-      let exnParts = literateColouriseExceptions options message
-      if not exnParts.IsEmpty then
-        [ Environment.NewLine, Text ]
-        @ exnParts
-        @ [ Environment.NewLine, Text ]
-      else []
+    let themedExceptionParts = literateColouriseExceptions options message
 
     let getLogLevelToken = function
       | Verbose -> LevelVerbose
@@ -916,13 +908,13 @@ module Log =
   /// Create a named logger. Full stop (.) acts as segment delimiter in the
   /// hierachy of namespaces and loggers.
   let create (name : string) =
-    match name with null -> invalidArg "name" "name is null" | _ -> ()
+    if name = null then invalidArg "name" "name is null"
     Global.getStaticLogger (name.Split([|'.'|], StringSplitOptions.RemoveEmptyEntries))
     :> Logger
 
   /// Create an hierarchically named logger
   let createHiera (name : string[]) =
-    match name with null -> invalidArg "name" "name is null" | _ -> ()
+    if name = null then invalidArg "name" "name is null"
     if name.Length = 0 then invalidArg "name" "must have >0 segments"
     Global.getStaticLogger name
     :> Logger
@@ -962,7 +954,7 @@ module Message =
   /// Sets the name as a single string; if this string contains dots, the string
   /// will be split on these dots.
   let setSingleName (name : string) (x : Message) =
-    match name with null -> invalidArg "name" "may not be null" | _ -> ()
+    if name = null then invalidArg "name" "may not be null"
 
     let name' =
       name.Split([|'.'|], StringSplitOptions.RemoveEmptyEntries)
